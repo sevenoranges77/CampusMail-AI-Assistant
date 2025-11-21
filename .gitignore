@@ -1,0 +1,18 @@
+# --- 忽略机密配置 (千万不能漏!) ---
+config.py
+credentials.json
+token.json
+google_auth.py
+proxy_patch.py
+
+# --- 忽略个人数据 ---
+*.xlsx
+*.csv
+*.log
+
+# --- 忽略 Python 缓存和环境 ---
+__pycache__/
+*.pyc
+venv/
+.env
+.DS_Store
