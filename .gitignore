@@ -1,18 +1,18 @@
-# --- 忽略机密配置 (千万不能漏!) ---
+# --- 忽略机密配置 (这些包含密码，必须忽略) ---
 config.py
 credentials.json
 token.json
 google_auth.py
-proxy_patch.py
+user_config.json
 
-# --- 忽略个人数据 ---
+# --- 忽略个人数据 (防止泄露你的面试记录) ---
 *.xlsx
 *.csv
 *.log
+campus_data.xlsx
 
-# --- 忽略 Python 缓存和环境 ---
+# --- 忽略 Python 缓存和打包产物 ---
 __pycache__/
-*.pyc
-venv/
-.env
-.DS_Store
+build/
+dist/
+*.spec

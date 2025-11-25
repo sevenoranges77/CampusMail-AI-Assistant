@@ -1,28 +1,44 @@
 # ==============================================
-# llm_parser.py (去繁从简版 - 依赖全局补丁)
+# llm_parser.py (V2.6 - 增加连接探针与错误细分)
 # ==============================================
 
 import json
 import datetime
 import re
-from openai import OpenAI
+from openai import OpenAI, AuthenticationError, APIConnectionError, RateLimitError
 from config import Config
 
 class LLMParser:
     def __init__(self):
-        # 1. 不需要再手动配置 httpx 代理了
-        # 因为 main.py 里的 proxy_patch 已经接管了所有网络流量
-        
-        print("🤖 LLM Client 初始化 (将使用全局代理补丁)...")
-
-        # 2. 直接初始化 OpenAI
-        # 注意：这里去掉了 http_client 参数
+        # 初始化 OpenAI 客户端
+        # 注意：网络流量由 main.py 中的 proxy_patch 接管
+        print("🤖 LLM Client 初始化...")
         self.client = OpenAI(
             api_key=Config.LLM_API_KEY,
             base_url=Config.LLM_API_BASE
         )
-        
         self.model = Config.LLM_MODEL
+
+    def test_connection(self):
+        """
+        [新增] 连通性探针
+        用于在正式解析前测试 API Key 和网络状态
+        """
+        try:
+            self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": "Hi"}],
+                max_tokens=1
+            )
+            return True, "✅ API 连接正常"
+        except AuthenticationError:
+            return False, "❌ API Key 无效或已过期 (401)"
+        except RateLimitError:
+            return False, "❌ 账户余额不足或触发限流 (429)"
+        except APIConnectionError:
+            return False, "❌ 无法连接 API 服务器，请检查网络或代理"
+        except Exception as e:
+            return False, f"❌ API 未知错误: {str(e)[:50]}..."
 
     def parse_email(self, email_body, received_time_str):
         """
@@ -31,26 +47,28 @@ class LLMParser:
         current_time_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         system_prompt = """
-你是一个极其精准的“校招邮件智能助理”。你的任务是将邮件解析为严格的JSON格式。
+你是一个极其精准的“校招邮件智能助理”。你的任务是将邮件解析为严格的 JSON 格式。
 
-【核心规则：时间推算与补全】
-1. **缺省推断**：如果是面试/会议 (FIXED_SLOT) 但邮件只给了开始时间，请**自动假设持续1小时**，计算出 end_time。
-2. **考试时间段**：如果邮件给出了具体的考试窗口（如 "15:00开始，20:00结束"），请将其归类为 **FIXED_SLOT**，并填入 start/end time。不要归类为 DDL。
-3. **相对时间**：必须根据 [CONTEXT] 中的 "Email Received Time" 推算绝对日期。如 "48小时内" + 接收时间 11-20 = ddl 11-22。
+【核心规则：时间推算与清洗】
+1. **DDL 精确度**：如果邮件中的截止时间包含具体时刻（如 "20:00" 或 "收到邮件后48小时"），**必须保留时分秒**，格式为 YYYY-MM-DDTHH:MM:SS。只有当邮件只给了日期时，才使用 YYYY-MM-DD。
+2. **清洗脏数据**：邮件中的时间常带有干扰词（如 "星期六"、"GMT+8"、"北京时间"）。请**自动剔除**这些干扰，只提取标准时间。
+   - 输入: "2025-11-22 15:00 星期六" -> 输出: "2025-11-22T15:00:00"
+3. **缺省推断**：如果是 FIXED_SLOT 但只给了开始时间，自动假设持续 1 小时计算 end_time。
+4. **广告过滤**：如果邮件中包含“退订”、“投诉”等广告高频词，请**自动剔除**这些邮件，不进行解析。
 
 Schema:
 {
   "category": "DDL" | "FIXED_SLOT" | "RESUME_UPDATE" | "APPLICATION_RECEIVED" | "ADVERTISEMENT" | "OTHER_RECRUITMENT" | "OTHER_PERSONAL",
   "event_title": "string | null",
-  "start_time": "YYYY-MM-DDTHH:MM:SS | null (FIXED_SLOT 必填)",
-  "end_time": "YYYY-MM-DDTHH:MM:SS | null (FIXED_SLOT 必填)",
-  "ddl": "YYYY-MM-DD | null (DDL 必填)",
+  "start_time": "YYYY-MM-DDTHH:MM:SS | null",
+  "end_time": "YYYY-MM-DDTHH:MM:SS | null",
+  "ddl": "string | null (格式: YYYY-MM-DD 或 YYYY-MM-DDTHH:MM:SS)", 
   "summary_info": "string | null"
 }
 
 分类说明:
-- FIXED_SLOT: 面试、宣讲会、**特定时段的在线考试**。
-- DDL: 只有截止日期的测评/笔试/任务。
+- DDL: 测评/笔试 (务必尽可能精确到分钟)。
+- FIXED_SLOT: 面试/特定时段考试 (务必清洗掉星期几等字符)。
 """
         
         user_prompt = f"""
@@ -66,7 +84,6 @@ Email Received Time: {received_time_str}
 """
 
         try:
-            # 调用 LLM
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
@@ -78,7 +95,7 @@ Email Received Time: {received_time_str}
             
             raw_content = response.choices[0].message.content.strip()
             
-            # 清洗数据
+            # 清洗数据，提取 JSON
             match = re.search(r'\{.*\}', raw_content, re.DOTALL)
             if match:
                 json_str = match.group(0)
@@ -96,17 +113,8 @@ Email Received Time: {received_time_str}
             return None
 
 if __name__ == "__main__":
-    # 单独运行此文件测试时，需要手动打补丁，因为 main.py 没运行
     import proxy_patch
     proxy_patch.apply_proxy()
-    
     parser = LLMParser()
-    fake_body = "测试内容"
-    fake_time = "2025-01-01"
-    print("🤖 测试连接...")
-    # 这里可能会因为内容太短被模型拒绝，主要看会不会报 Connection Error
-    try:
-        parser.parse_email(fake_body, fake_time)
-        print("✅ 连接成功 (即使解析失败也是成功的)")
-    except:
-        print("❌ 连接依然失败")
+    success, msg = parser.test_connection()
+    print(msg)
