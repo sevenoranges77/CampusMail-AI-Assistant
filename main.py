@@ -1,114 +1,191 @@
 # ==============================================
-# 1. 注入网络补丁 (确保 Google 服务能连通)
+# V2.6 Main Controller - Smart Diagnostics & Safety Stop
 # ==============================================
 import proxy_patch
 proxy_patch.apply_proxy()
-# ==============================================
 
 import time
+import datetime
+import json
+import os
 from config import Config
 from mail_reader import MailReader
 from llm_parser import LLMParser
-from sheet_writer import SheetWriter
-from calendar_writer import CalendarWriter
+from storage_manager import StorageManager
+from email.utils import parsedate_to_datetime
+from win10toast import ToastNotifier
 
-def main():
-    print("\n" + "="*50)
-    print("🚀 LLM 校招助手 (CampusMail AI) - 启动！")
-    print("="*50 + "\n")
+# 停止信号文件 (Dashboard 点击停止按钮时创建此文件)
+STOP_FLAG_FILE = ".stop_flag"
 
-    # 1. 初始化各个模块
-    print("📦 正在初始化模块...")
+def log_msg(msg, callback=None):
+    print(msg)
+    if callback:
+        callback(msg)
+
+def check_for_stop_signal():
+    """检查是否存在停止信号文件"""
+    if os.path.exists(STOP_FLAG_FILE):
+        try:
+            os.remove(STOP_FLAG_FILE) # 清除信号以便下次运行
+        except: pass
+        return True
+    return False
+
+def reload_user_config():
+    if os.path.exists("user_config.json"):
+        try:
+            with open("user_config.json", "r", encoding='utf-8') as f:
+                data = json.load(f)
+                Config.EMAIL_USER = data.get("EMAIL_USER", Config.EMAIL_USER)
+                Config.EMAIL_PASS = data.get("EMAIL_PASS", Config.EMAIL_PASS)
+                Config.LLM_API_KEY = data.get("LLM_API_KEY", Config.LLM_API_KEY)
+                Config.LLM_API_BASE = data.get("LLM_API_BASE", Config.LLM_API_BASE)
+                Config.LLM_MODEL = data.get("LLM_MODEL", Config.LLM_MODEL)
+                Config.PROXY_HOST = data.get("PROXY_HOST", Config.PROXY_HOST)
+                try:
+                    Config.PROXY_PORT = int(data.get("PROXY_PORT", Config.PROXY_PORT))
+                except: pass
+        except Exception: pass
+
+def main(ui_callback=None):
+    # 0. 清理旧的停止信号
+    if os.path.exists(STOP_FLAG_FILE):
+        try: os.remove(STOP_FLAG_FILE)
+        except: pass
+
+    reload_user_config()
+    
+    def logger(text):
+        log_msg(text, ui_callback)
+
+    logger("-" * 30)
+    logger("🚀 进程启动 (V2.6)...")
+
+    # ================= 1. 模块初始化与自检 (Diagnostics) =================
     try:
         reader = MailReader()
         llm = LLMParser()
-        sheet = SheetWriter()
-        calendar = CalendarWriter()
-        print("✅ 模块初始化完成。")
+        storage = StorageManager()
     except Exception as e:
-        print(f"❌ 初始化失败，请检查配置: {e}")
+        logger(f"❌ 模块初始化崩溃: {e}")
         return
 
-    # 2. 获取邮件
-    print(f"\n📧 正在扫描最近 {Config.LOOKBACK_DAYS} 天的邮件...")
-    emails = reader.get_recent_emails()
-    print(f"✅ 扫描结束，准备处理 {len(emails)} 封邮件。\n")
+    # [诊断 A] API 连通性测试
+    logger("🔍 正在测试 API 连接...")
+    api_ok, api_msg = llm.test_connection()
+    if not api_ok:
+        logger(api_msg)
+        logger("🛑 流程终止：请先修复 API 配置")
+        return
+    logger(api_msg)
 
-    # 统计数据
-    stats = {"processed": 0, "skipped": 0, "created": 0, "errors": 0}
+    # [诊断 B] 邮箱连通性测试
+    logger("🔍 正在连接邮箱服务器...")
+    try:
+        reader.connect()
+        logger("✅ 邮箱连接成功")
+    except Exception as e:
+        logger(str(e)) # 此时 e 包含了 mail_reader 中抛出的具体错误文案
+        logger("🛑 流程终止：请修复邮箱配置")
+        return
 
-    # 3. 核心循环
+    # ================= 2. 邮件获取 =================
+    logger(f"📧 正在扫描最近 {Config.LOOKBACK_DAYS} 天的邮件...")
+    if check_for_stop_signal():
+        logger("🛑 用户取消操作")
+        return
+
+    try:
+        emails = reader.get_recent_emails()
+    except Exception as e:
+        logger(f"❌ 扫描过程出错: {e}")
+        return
+    
+    if not emails:
+        logger("⚠️ 未获取到新邮件 (可能是全已读或配置了只收最近30天)")
+        return
+
+    logger(f"✅ 准备处理 {len(emails)} 封邮件")
+
+    # ================= 3. 核心循环 =================
+    stats = {"saved": 0, "logged": 0, "skipped": 0, "errors": 0}
+    consecutive_errors = 0 # 连续错误计数器 (熔断机制)
+
     for i, email_data in enumerate(emails, 1):
+        # [关键] 检查停止信号
+        if check_for_stop_signal():
+            logger("🛑 检测到停止信号，正在保存进度并退出...")
+            break
+
         subject = email_data['subject']
         msg_id = email_data['message_id']
-        sender = email_data['from']
-        received_time = email_data['received_time']
+        received_time_str = email_data['received_time']
         
-        print(f"[{i}/{len(emails)}] 正在处理: {subject[:30]}...")
+        try:
+            received_time_obj = parsedate_to_datetime(received_time_str)
+        except:
+            received_time_obj = datetime.datetime.now()
 
-        # --- A. 幂等性检查 (查重) ---
-        if sheet.is_message_processed_successfully(msg_id):
-            print("   └── 🟡 [跳过] 日志显示已处理过。")
+        logger(f"[{i}/{len(emails)}] {subject[:15]}...")
+
+        # 检查是否已处理
+        if storage.is_processed(msg_id):
+            logger(f"   🟡 跳过 (已存在)")
             stats["skipped"] += 1
             continue
 
-        # --- B. LLM 智能解析 ---
-        print("   └── 🤖 正在呼叫 LLM 解析...", end="", flush=True)
-        llm_result = llm.parse_email(email_data['body'], received_time)
+        # 调用 LLM
+        logger(f"   🤖 解析中...")
+        llm_result = llm.parse_email(email_data['body'], received_time_str)
         
         if not llm_result:
-            print("❌ 失败 (API错误)")
+            logger("   ❌ 解析失败 (API返回异常)")
             stats["errors"] += 1
+            consecutive_errors += 1
+            if consecutive_errors >= 5:
+                logger("🛑 连续 5 次解析失败，疑似 API 服务不稳定，自动停止。")
+                break
             continue
+        
+        consecutive_errors = 0 # 重置错误计数
             
         category = llm_result.get('category', 'UNKNOWN')
-        print(f"完成 -> 分类: [{category}]")
+        logger(f"   ✅ 识别为: [{category}]")
 
-        # ================= 新增调试代码 =================
-        # 打印出 LLM 返回的完整数据，让我们看看它到底漏了什么
-        import json
-        print(f"   🔍 [DEBUG] LLM原始数据: {json.dumps(llm_result, ensure_ascii=False)}")
-        # ===============================================
-
-
-        # --- C. 执行动作 (写日历) ---
-        action_record = "Ignored" # 默认动作
+        success = storage.save_event(
+            llm_json=llm_result, 
+            msg_id=msg_id, 
+            original_body=email_data['body'],
+            received_time_obj=received_time_obj
+        )
         
-        # 只有这三类才写日历
-        if category in ['DDL', 'FIXED_SLOT', 'RESUME_UPDATE']:
-            print(f"   └── 📅 发现高价值事件，正在写入日历...", end="", flush=True)
-            
-            # 【修改】传入 received_time
-            success = calendar.create_event(llm_result, msg_id, received_time)
-            if success:
-                print("✅ 成功！")
-                action_record = "Calendar Created"
-                stats["created"] += 1
+        if success:
+            if category in ['DDL', 'FIXED_SLOT', 'RESUME_UPDATE']:
+                stats["saved"] += 1 
             else:
-                print("❌ 失败 (参数缺失)")
-                action_record = "Calendar Failed"
-                stats["errors"] += 1
+                stats["logged"] += 1
         else:
-            print(f"   └── 🗑️ 低价值/无关邮件，忽略。")
-            action_record = f"Ignored ({category})"
-            stats["processed"] += 1
-
-        # --- D. 风险审计 (写日志) ---
-        # 无论如何，都要把这次判断写入 Google Sheet
-        sheet.log_action(sender, subject, msg_id, category, action_record)
+            logger("   ❌ 写入数据库失败 (文件被占用?)")
+            stats["errors"] += 1
         
-        # 礼貌性暂停，避免请求太快
-        time.sleep(1)
+        time.sleep(0.5)
 
-    # 4. 总结
-    print("\n" + "="*50)
-    print("🏁 运行结束报告")
-    print(f"Total Scanned : {len(emails)}")
-    print(f"Skipped (Old): {stats['skipped']}")
-    print(f"Processed    : {stats['processed']}")
-    print(f"Calendar New : {stats['created']}  <-- 新增日程")
-    print(f"Errors       : {stats['errors']}")
-    print("="*50 + "\n")
+    logger("-" * 30)
+    summary = f"新增 {stats['saved']} | 跳过 {stats['skipped']} | 失败 {stats['errors']}"
+    logger(f"🏁 运行结束: {summary}")
+
+    # 桌面通知
+    if stats['saved'] > 0:
+        try:
+            toaster = ToastNotifier()
+            toaster.show_toast(
+                "CampusAI 校招助手",
+                f"处理完成！发现了 {stats['saved']} 个新事项。",
+                duration=5,
+                threaded=True
+            )
+        except Exception: pass
 
 if __name__ == "__main__":
     main()

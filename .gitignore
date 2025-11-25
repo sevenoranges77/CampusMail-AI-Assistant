@@ -12,7 +12,9 @@ proxy_patch.py
 
 # --- 忽略 Python 缓存和环境 ---
 __pycache__/
-*.pyc
-venv/
-.env
-.DS_Store
+build/
+dist/
+*.spec
+user_config.json
+campus_data.xlsx
+*.log
