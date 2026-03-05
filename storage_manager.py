@@ -1,6 +1,15 @@
+# ==============================================
+# storage_manager.py (V3.0 - Excel 加固 + 服务层抽象)
+# ==============================================
 import pandas as pd
 import os
+import time
 import datetime
+import tempfile
+import shutil
+from logger_config import setup_logger
+
+logger = setup_logger("CampusAI.Storage")
 
 class StorageManager:
     def __init__(self, file_path="campus_data.xlsx"):
@@ -19,12 +28,55 @@ class StorageManager:
     def _init_file(self):
         if not os.path.exists(self.file_path):
             df = pd.DataFrame(columns=self.columns)
-            df.to_excel(self.file_path, index=False)
+            self._safe_write_excel(df)
+
+    def _safe_write_excel(self, df, max_retries=3):
+        """
+        安全写入 Excel：先写临时文件，成功后原子替换。
+        如果 Excel 被占用，最多重试 max_retries 次。
+        """
+        for attempt in range(1, max_retries + 1):
+            try:
+                # 在同目录下创建临时文件
+                target_dir = os.path.dirname(os.path.abspath(self.file_path))
+                fd, tmp_path = tempfile.mkstemp(suffix='.xlsx', dir=target_dir)
+                os.close(fd)
+                
+                df.to_excel(tmp_path, index=False)
+                
+                # 原子替换
+                shutil.move(tmp_path, self.file_path)
+                return True
+            except PermissionError:
+                logger.warning(f"文件被占用，第 {attempt}/{max_retries} 次重试...")
+                # 清理临时文件
+                try:
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
+                except Exception:
+                    pass
+                time.sleep(1)
+            except Exception as e:
+                logger.error(f"Excel 写入失败: {e}", exc_info=True)
+                # 清理临时文件
+                try:
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
+                except Exception:
+                    pass
+                break
+        
+        logger.error(f"写入 Excel 失败，已重试 {max_retries} 次")
+        return False
 
     def load_data(self):
         try:
             return pd.read_excel(self.file_path)
+        except PermissionError:
+            logger.warning("Excel 文件被占用，无法读取，返回空数据")
+            return pd.DataFrame(columns=self.columns)
         except Exception as e:
+            logger.error(f"读取 Excel 失败: {e}", exc_info=True)
             return pd.DataFrame(columns=self.columns)
 
     def is_processed(self, msg_id):
@@ -34,6 +86,13 @@ class StorageManager:
         df = self.load_data()
         if df.empty: return False
         return msg_id in df["MsgID"].values
+
+    def on_event_saved(self, event_data: dict):
+        """
+        事件钩子：保存成功后触发。
+        子类或外部插件可覆写此方法实现扩展推送（如飞书通知）。
+        """
+        pass
 
     def save_event(self, llm_json, msg_id, original_body, received_time_obj=None):
         """
@@ -62,7 +121,8 @@ class StorageManager:
                     if end:
                         try:
                             end_clean = end.replace('T', ' ').split(' ')[1][:5]
-                        except:
+                        except (IndexError, AttributeError) as e:
+                            logger.warning(f"FIXED_SLOT end_time 解析异常 (end={end}): {e}")
                             end_clean = end
                         final_time_str = f"{start_clean} ~ {end_clean}"
                     else:
@@ -74,7 +134,8 @@ class StorageManager:
                         target_date = received_time_obj + datetime.timedelta(days=3)
                         final_time_str = target_date.strftime("%Y-%m-%d %H:%M") + " (建议)"
                         title = f"[建议3天内] {title}"
-                    except:
+                    except Exception as e:
+                        logger.warning(f"RESUME_UPDATE 时间推算失败: {e}")
                         final_time_str = llm_json.get('ddl')
                 else:
                      final_time_str = llm_json.get('ddl')
@@ -104,21 +165,24 @@ class StorageManager:
         new_df = pd.DataFrame([new_row])
         df = pd.concat([df, new_df], ignore_index=True)
         
-        try:
-            df.to_excel(self.file_path, index=False)
+        success = self._safe_write_excel(df)
+        
+        if success:
             if status == "未完成":
-                print(f"💾 [Task Saved] {title}")
+                logger.info(f"💾 [Task Saved] {title}")
             else:
-                print(f"📝 [Log Saved] 已记录低价值邮件: {category}")
-            return True
-        except Exception as e:
-            print(f"❌ [Excel Error] 写入失败: {e}")
-            return False
+                logger.info(f"📝 [Log Saved] 已记录低价值邮件: {category}")
+            
+            # 触发事件钩子（飞书等扩展可挂载于此）
+            self.on_event_saved(new_row)
+        else:
+            logger.error(f"❌ [Excel Error] 写入失败: {title}")
+        
+        return success
 
     def update_status(self, msg_id, new_status):
         df = self.load_data()
         if msg_id in df["MsgID"].values:
             df.loc[df["MsgID"] == msg_id, "Status"] = new_status
-            df.to_excel(self.file_path, index=False)
-            return True
+            return self._safe_write_excel(df)
         return False

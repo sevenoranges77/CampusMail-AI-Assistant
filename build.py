@@ -35,8 +35,8 @@ def build():
         '--hidden-import=email.utils',
         '--hidden-import=email.header',
         '--hidden-import=socket',
-        '--hidden-import=socks',    # PySocks
         '--hidden-import=httpx',
+        '--hidden-import=tenacity',
         
         # 2. 数据处理相关
         '--hidden-import=pandas',
@@ -77,6 +77,7 @@ def build():
         '--add-data=llm_parser.py;.',
         '--add-data=storage_manager.py;.',
         '--add-data=proxy_patch.py;.',
+        '--add-data=logger_config.py;.',
     ])
     
     print("✅ 打包完成！请查看 dist 文件夹。")
