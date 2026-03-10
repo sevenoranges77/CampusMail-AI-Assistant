@@ -6,6 +6,9 @@ from email.utils import parsedate_to_datetime
 import datetime
 from bs4 import BeautifulSoup 
 from config import Config
+from logger_config import setup_logger
+
+logger = setup_logger("CampusAI.MailReader")
 
 class MailReader:
     def __init__(self):
@@ -19,7 +22,7 @@ class MailReader:
         连接邮箱，具有精确的错误诊断功能
         """
         try:
-            print(f"🔌 正在连接 IMAP 服务器: {self.imap_server}...")
+            logger.info(f"🔌 正在连接 IMAP 服务器: {self.imap_server}...")
             self.mail = imaplib.IMAP4_SSL(self.imap_server, timeout=10) # 增加超时设置
             self.mail.login(self.email_user, self.email_pass)
             return True
@@ -29,7 +32,8 @@ class MailReader:
             if isinstance(e.args[0], bytes):
                 try:
                     err_msg = e.args[0].decode('utf-8', 'ignore')
-                except: pass
+                except Exception as decode_err:
+                    logger.warning(f"IMAP 错误信息解码失败: {decode_err}")
             
             if "AUTHENTICATIONFAILED" in err_msg or "Login failed" in err_msg:
                 raise Exception("❌ 登录失败：授权码错误或未开启 IMAP 服务。请检查QQ邮箱设置。")
@@ -53,7 +57,7 @@ class MailReader:
         status, messages = self.mail.search(None, f'(SINCE "{date_since}")')
         
         if status != "OK" or not messages[0]:
-            print("⚠️ 未搜索到邮件")
+            logger.warning("⚠️ 未搜索到邮件")
             return []
 
         email_ids = messages[0].split()
@@ -77,7 +81,8 @@ class MailReader:
                             email_date = parsedate_to_datetime(msg.get("Date"))
                             if email_date < limit_datetime:
                                 break 
-                        except: pass
+                        except Exception as e:
+                            logger.warning(f"邮件日期解析失败 (Date={msg.get('Date')}): {e}")
 
                         # 提取主题
                         subject, encoding = decode_header(msg["Subject"])[0]
@@ -87,6 +92,8 @@ class MailReader:
                         email_from = msg.get("From")
                         message_id = msg.get("Message-ID")
                         date_str = msg.get("Date")
+                        in_reply_to = msg.get("In-Reply-To")
+                        references = msg.get("References")
                         
                         # 正文提取
                         body = self._get_email_body_robust(msg)
@@ -98,11 +105,13 @@ class MailReader:
                                 "subject": subject,
                                 "from": email_from,
                                 "message_id": message_id,
+                                "in_reply_to": in_reply_to,
+                                "references": references,
                                 "received_time": date_str,
                                 "body": clean_body[:3000]
                             })
             except Exception as e:
-                print(f"⚠️ 单封邮件解析出错 (跳过): {e}")
+                logger.warning(f"⚠️ 单封邮件解析出错 (跳过): {e}", exc_info=True)
                 continue
                 
         return results
@@ -131,8 +140,8 @@ class MailReader:
                         html_content += decoded_content
                     elif content_type == "text/plain":
                         text_content += decoded_content
-                except:
-                    pass
+                except Exception as e:
+                    logger.debug(f"邮件 Part 解码失败 (type={part.get_content_type()}): {e}")
         else:
             try:
                 payload = msg.get_payload(decode=True)
@@ -142,14 +151,14 @@ class MailReader:
                     html_content = content
                 else:
                     text_content = content
-            except:
-                pass
+            except Exception as e:
+                logger.warning(f"非 Multipart 邮件体解码失败: {e}", exc_info=True)
 
         if html_content:
             try:
                 soup = BeautifulSoup(html_content, "html.parser")
                 return soup.get_text(separator="\n")
             except Exception as e:
-                pass
+                logger.warning(f"HTML 转文本失败: {e}")
         
         return text_content

@@ -1,35 +1,28 @@
-import socks
-import socket
+# ==============================================
+# proxy_patch.py (V3.0 - 环境变量代理，移除猴子补丁)
+# ==============================================
+import os
 from config import Config
+from logger_config import setup_logger
+
+logger = setup_logger("CampusAI.Proxy")
 
 def apply_proxy():
     """
-    智能代理补丁 (Smart Proxy Patch)
-    逻辑更新：只有在 Config 中明确配置了代理 IP 和端口时才启用。
+    标准代理配置：通过环境变量设置代理。
+    OpenAI SDK、requests、httpx 等均原生支持 HTTP_PROXY/HTTPS_PROXY。
     """
-    # [关键修改] 检查配置是否为空
     if not Config.PROXY_HOST or not Config.PROXY_PORT:
-        print("🌐 [Network] 未配置代理，将使用直连模式 (Direct Connection)。")
+        # 清理环境变量，确保直连
+        os.environ.pop("HTTP_PROXY", None)
+        os.environ.pop("HTTPS_PROXY", None)
+        os.environ.pop("NO_PROXY", None)
+        logger.info("🌐 [Network] 未配置代理，将使用直连模式 (Direct Connection)。")
         return
 
-    print(f"💉 [Proxy Patch] 正在注入代理: {Config.PROXY_HOST}:{Config.PROXY_PORT} ...")
+    proxy_url = f"http://{Config.PROXY_HOST}:{Config.PROXY_PORT}"
+    os.environ["HTTP_PROXY"] = proxy_url
+    os.environ["HTTPS_PROXY"] = proxy_url
+    os.environ["NO_PROXY"] = "localhost,127.0.0.1,::1"
     
-    try:
-        # 定义智能 Socket 类
-        class SmartSocket(socks.socksocket):
-            def connect(self, dest_pair):
-                host = dest_pair[0]
-                # 本地地址直连
-                if host in ["localhost", "127.0.0.1", "::1"]:
-                    self.set_proxy(None)
-                else:
-                    # 外网走配置的代理
-                    self.set_proxy(socks.HTTP, Config.PROXY_HOST, Config.PROXY_PORT)
-                super().connect(dest_pair)
-
-        # 替换全局 Socket
-        socket.socket = SmartSocket
-        print("✅ [Proxy Patch] 代理注入成功！")
-        
-    except Exception as e:
-        print(f"⚠️ [Proxy Patch] 代理配置失败，回退到直连模式: {e}")
+    logger.info(f"🌐 [Network] 已通过环境变量设置代理: {proxy_url}")
