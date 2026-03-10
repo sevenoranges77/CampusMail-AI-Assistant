@@ -253,18 +253,67 @@ with st.sidebar:
         else:
             llm_model = st.text_input("模型名称", value=current_model_val, help="未能自动拉取，请手动输入或点击上方按钮")
 
+    # 4. 飞书推送
+    with st.expander("飞书通知", expanded=False):
+        st.caption("绑定飞书机器人后，扫描完成或有重要提醒时会自动推送到飞书群。\n**此项为选填，不填也不影响系统正常运行。**")
+        feishu_url = st.text_input(
+            "Webhook URL",
+            value=_init_conf.get("FEISHU_WEBHOOK_URL", ""),
+            type="password",
+            help="在飞书群中添加'自定义机器人'后获取的 Webhook 地址，选填。"
+        )
+        if feishu_url:
+            if st.button("🔔 发送测试消息", use_container_width=True):
+                from feishu_pusher import FeishuPusher
+                pusher = FeishuPusher(feishu_url)
+                ok, msg = pusher.send_test_message()
+                if ok:
+                    st.toast("✅ 测试消息已发送，请查看飞书", icon="🎉")
+                else:
+                    st.toast(f"❌ {msg}", icon="🚫")
+        else:
+            st.caption("未绑定飞书，不影响正常使用")
+
+    # 5. 定时任务状态
+    with st.expander("定时任务", expanded=False):
+        st.caption("通过系统托盘启动时，定时任务自动运行。")
+        auto_scan = st.checkbox(
+            "开启每日自动扫描",
+            value=_init_conf.get("AUTO_SCAN_ENABLED", True),
+            help="需通过托盘服务 (tray_service.py) 启动才生效"
+        )
+        if auto_scan:
+            scan_time = st.text_input(
+                "扫描 Cron 表达式",
+                value=_init_conf.get("AUTO_SCAN_CRON", "0 9 * * *"),
+                help="默认每天 09:00 扫描。格式: 分 时 日 月 周"
+            )
+        else:
+            scan_time = _init_conf.get("AUTO_SCAN_CRON", "0 9 * * *")
+
     # 保存按钮
     if st.button("💾 保存系统配置", type="secondary", use_container_width=True):
         final_host = proxy_host if enable_proxy else ""
         final_port = proxy_port if enable_proxy else ""
-        new_config = {
+        # 先读取已有配置再合并（保留用户未在侧边栏展示的字段）
+        existing_config = {}
+        if os.path.exists("user_config.json"):
+            try:
+                with open("user_config.json", "r", encoding='utf-8') as f:
+                    existing_config = json.load(f)
+            except Exception:
+                pass
+        existing_config.update({
             "EMAIL_USER": email_user, "EMAIL_PASS": email_pass,
             "PROXY_HOST": final_host, "PROXY_PORT": final_port,
-            "LLM_API_BASE": llm_base, "LLM_API_KEY": llm_key, "LLM_MODEL": llm_model
-        }
+            "LLM_API_BASE": llm_base, "LLM_API_KEY": llm_key, "LLM_MODEL": llm_model,
+            "FEISHU_WEBHOOK_URL": feishu_url,
+            "AUTO_SCAN_ENABLED": auto_scan,
+            "AUTO_SCAN_CRON": scan_time,
+        })
         try:
             with open("user_config.json", "w", encoding='utf-8') as f:
-                json.dump(new_config, f, indent=4, ensure_ascii=False)
+                json.dump(existing_config, f, indent=4, ensure_ascii=False)
             st.toast("✅ 配置已保存，下次启动生效", icon="💾")
             time.sleep(1)
         except Exception as e: st.error(f"保存失败: {e}")
@@ -347,7 +396,7 @@ with st.sidebar:
 
 # ================== 5. 主界面逻辑 (数据看板) ==================
 st.title("CampusAI Dashboard")
-st.markdown(f"<div style='color: #888; margin-top: -15px; margin-bottom: 30px;'>智能校招邮件管理系统 V2.6</div>", unsafe_allow_html=True)
+st.markdown(f"<div style='color: #888; margin-top: -15px; margin-bottom: 30px;'>智能校招邮件管理系统 V3.0</div>", unsafe_allow_html=True)
 
 try:
     sm = StorageManager()
@@ -398,13 +447,14 @@ if not df.empty:
         task_view['Done'] = task_view['Status'] == '已完成'
         
         edited_df = st.data_editor(
-            task_view[["Done", "Category_CN", "Title", "Time_Info", "MsgID"]],
+            task_view[["Done", "Category_CN", "Title", "Time_Info", "Original_Body", "MsgID"]],
             column_config={
                 "Done": st.column_config.CheckboxColumn("状态", width="small"),
                 "Category_CN": st.column_config.TextColumn("类型", disabled=True),
                 "Title": st.column_config.TextColumn("事项标题", width="large", disabled=True),
                 "Time_Info": st.column_config.TextColumn("时间", width="medium", disabled=True),
-                "MsgID": st.column_config.TextColumn("ID", disabled=True)
+                "Original_Body": st.column_config.TextColumn("邮件原文", width="large", disabled=True),
+                "MsgID": None  # 隐藏 ID 列
             },
             hide_index=True, use_container_width=True, key="editor"
         )

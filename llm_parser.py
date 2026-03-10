@@ -70,28 +70,49 @@ class LLMParser:
         current_time_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         system_prompt = """
-你是一个极其精准的"校招邮件智能助理"。你的任务是将邮件解析为严格的 JSON 格式。
+你是一个极其精准的"校招邮件智能分类与解析助理"。你的任务是将邮件精准分类，并转化为严格的 JSON 格式。
 
-【核心规则：时间推算与清洗】
-1. **DDL 精确度**：如果邮件中的截止时间包含具体时刻（如 "20:00" 或 "收到邮件后48小时"），**必须保留时分秒**，格式为 YYYY-MM-DDTHH:MM:SS。只有当邮件只给了日期时，才使用 YYYY-MM-DD。
-2. **清洗脏数据**：邮件中的时间常带有干扰词（如 "星期六"、"GMT+8"、"北京时间"）。请**自动剔除**这些干扰，只提取标准时间。
-   - 输入: "2025-11-22 15:00 星期六" -> 输出: "2025-11-22T15:00:00"
-3. **缺省推断**：如果是 FIXED_SLOT 但只给了开始时间，自动假设持续 1 小时计算 end_time。
-4. **广告过滤**：如果邮件中包含"退订"、"投诉"、"直播"、"宣讲"等广告高频词，请**自动剔除**这些邮件，不进行解析。
+【第一步：核心意图分类（最重要）】
+你必须首先根据邮件的真实意图进行分类。特别注意区分【群发引流宣讲】与【个人专属待办】。
+
+1. ADVERTISEMENT（广告/宣讲/邀请报名 - 高优拦截）:
+   - 邀请参加：线下/线上宣讲会、直播宣讲、Open Day、座谈会。
+   - 鼓励投递：网申启动通知、简历投递邀请、人才库储备、各类赛事或训练营报名邀请。
+   - 特征：包含大量“退订”、“精彩回顾”等营销词汇。
+   - 注意：绝对不能因为邮件里有“宣讲会开始时间”或“报名截止时间”就将其判定为面试或测评。只要是群发邀请参与公共活动的，都是广告！
+
+2. DDL（个人专属 - 测评/笔试/材料补充）:
+   - 发给个人的专属在线测评、笔试链接。
+   - 要求用户在某个期限前补充简历信息、提交作品集或填写信息收集表。
+   - 注意：一定是在用户网申后产生的待办任务。单纯邀请“报名某个比赛”属于 ADVERTISEMENT。
+
+3. FIXED_SLOT（个人专属 - 面试/定点时段考试）:
+   - 单独为用户个人安排的具体面试（如一面、二面、HR面）或指明了准确参加时段的正式上机考试。
+   - 注意：切勿将“某日举办宣讲会”误判为 FIXED_SLOT！
+
+4. APPLICATION_RECEIVED / RESUME_UPDATE（状态流转）:
+   - 投递成功/感谢信/简历进入人才库/状态流转通知。
+
+5. OTHER_RECRUITMENT / OTHER_PERSONAL:
+   - 不属于上述分类的其他招聘邮件或无关私人邮件。
+
+【第二步：时间推算与清洗】（主要针对 DDL 和 FIXED_SLOT）
+1. DDL 精确度：如包含具体时刻（"20:00"）保留时分秒 `YYYY-MM-DDTHH:MM:SS`，否则仅提取日期 `YYYY-MM-DD`。
+2. 清洗脏数据：自动剔除“星期六”、“GMT+8”、“北京时间”等干扰词，只提取纯净的标准时间。
+3. 缺省推断：如果是 FIXED_SLOT 但仅有开始时间，自动假设持续 1 小时计算 end_time。
+4. 弹性截止判断 (is_flexible_deadline)：针对 DDL，判断是弹性期限（如"3天内完成", true）还是定点时段（如"仅限明日14:00进行", false）。FIXED_SLOT 此项固定为 false。
 
 Schema:
 {
   "category": "DDL" | "FIXED_SLOT" | "RESUME_UPDATE" | "APPLICATION_RECEIVED" | "ADVERTISEMENT" | "OTHER_RECRUITMENT" | "OTHER_PERSONAL",
-  "event_title": "string | null",
+  "event_title": "string | null (精简标题或活动名称)",
+  "company_name": "string | null (发送方公司/组织名)",
   "start_time": "YYYY-MM-DDTHH:MM:SS | null",
   "end_time": "YYYY-MM-DDTHH:MM:SS | null",
-  "ddl": "string | null (格式: YYYY-MM-DD 或 YYYY-MM-DDTHH:MM:SS)", 
+  "ddl": "string | null (格式如 YYYY-MM-DD 或 YYYY-MM-DDTHH:MM:SS)", 
+  "is_flexible_deadline": "boolean",
   "summary_info": "string | null"
 }
-
-分类说明:
-- DDL: 测评/笔试 (务必尽可能精确到分钟)。
-- FIXED_SLOT: 面试/特定时段考试 (务必清洗掉星期几等字符)。
 """
         
         user_prompt = f"""

@@ -92,6 +92,8 @@ class MailReader:
                         email_from = msg.get("From")
                         message_id = msg.get("Message-ID")
                         date_str = msg.get("Date")
+                        in_reply_to = msg.get("In-Reply-To")
+                        references = msg.get("References")
                         
                         # 正文提取
                         body = self._get_email_body_robust(msg)
@@ -103,6 +105,8 @@ class MailReader:
                                 "subject": subject,
                                 "from": email_from,
                                 "message_id": message_id,
+                                "in_reply_to": in_reply_to,
+                                "references": references,
                                 "received_time": date_str,
                                 "body": clean_body[:3000]
                             })

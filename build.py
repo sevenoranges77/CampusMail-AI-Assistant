@@ -16,15 +16,16 @@ def build():
         shutil.rmtree('build')
     if os.path.exists('dist'):
         shutil.rmtree('dist')
-    if os.path.exists('校招助手_V2.spec'):
-        os.remove('校招助手_V2.spec')
+    if os.path.exists('校招助手_V3.spec'):
+        os.remove('校招助手_V3.spec')
 
     # 2. 运行 PyInstaller
     PyInstaller.__main__.run([
-        'run_app.py',
-        '--name=校招助手_V2',
+        'tray_service.py',
+        '--name=校招助手_V3',
         '--onefile',
         '--clean',
+        '--windowed',  # 无终端窗口
         
         # --- 核心修复：强制包含所有标准库和第三方库 ---
         
@@ -59,6 +60,13 @@ def build():
 
         '--hidden-import=win10toast',
         '--hidden-import=ics',
+        '--hidden-import=pystray',
+        '--hidden-import=PIL',
+        '--hidden-import=apscheduler',
+        '--hidden-import=apscheduler.schedulers.background',
+        '--hidden-import=apscheduler.triggers.cron',
+        '--hidden-import=requests',
+        '--hidden-import=difflib',
         # ----------------------------------------
         
         # 拷贝元数据 (Streamlit 必需)
@@ -78,6 +86,12 @@ def build():
         '--add-data=storage_manager.py;.',
         '--add-data=proxy_patch.py;.',
         '--add-data=logger_config.py;.',
+        '--add-data=time_validator.py;.',
+        '--add-data=event_dedup.py;.',
+        '--add-data=conflict_detector.py;.',
+        '--add-data=feishu_pusher.py;.',
+        '--add-data=scheduler.py;.',
+        '--add-data=tray_service.py;.',
     ])
     
     print("✅ 打包完成！请查看 dist 文件夹。")
